@@ -39,6 +39,25 @@ THE SOFTWARE.
 #include <opencv2/xfeatures2d.hpp>
 #endif
 
+std::vector<std::string> createVideoList(std::string name_file){
+    std::vector<std::string> video_paths;
+    try
+    {
+        std::ifstream file(name_file);
+        std::string video_path; 
+        while (std::getline(file, video_path))
+        {
+         video_paths.push_back(video_path);
+        }
+        return video_paths;
+    }
+    catch(const std::exception& e)
+    {
+        std::cerr << e.what() << '\n';
+        return video_paths;
+    }
+}
+
 std::vector<cv::Mat> loadFeatures(const std::vector<std::string>& path_to_images, const std::string& descriptor = "orb") {
     cv::Ptr<cv::Feature2D> feat_detector;
     if (descriptor == "orb") feat_detector = cv::ORB::create(2000);
@@ -70,7 +89,50 @@ std::vector<cv::Mat> loadFeatures(const std::vector<std::string>& path_to_images
     return features;
 }
 
-std::vector<cv::Mat> loadFeaturesFromVideo(std::vector<std::string> video_file_paths, const std::string& descriptor = "orb") {
+void createTestSetsFromVideos(std::string name_file){
+    std::vector<std::string> video_file_paths = createVideoList(name_file);
+    int f, frame_rate;
+    cv::Mat frame;
+    cv::VideoCapture vc1, vc2;
+    std::string file_name;
+    for(int c=0; c<video_file_paths.size()-1; c++){
+        vc1.open(video_file_paths[c]);
+        if(!vc1.isOpened()){
+            std::cout << "Error opening video stream or file" << std::endl;
+            return;
+        }
+        vc2.open(video_file_paths[c+1]);
+        if(!vc2.isOpened()){
+            std::cout << "Error opening video stream or file" << std::endl;
+            return;
+        }
+        frame_rate= vc1.get(cv::CAP_PROP_FPS);
+        int i = 0;
+        while(true){
+            f=i*frame_rate;
+            vc1.set(cv::CAP_PROP_POS_FRAMES ,f);
+            vc2.set(cv::CAP_PROP_POS_FRAMES ,f);
+            vc1 >> frame;
+            if (frame.empty()) {
+                std::cerr << "could not open frame: #" << i << ". Aborting." << std::endl;
+                break;
+            }
+            file_name = "test_image_" + std::to_string(i) + ".jpg";
+            imwrite(file_name, frame);
+
+            vc2 >> frame;
+            if (frame.empty()) {
+                std::cerr << "could not open frame: #" << i << ". Aborting." << std::endl;
+                break;
+            }
+            file_name = "test_image_" + std::to_string(i+1) + ".jpg";
+            imwrite(file_name, frame);
+            i+=2;
+        }
+    }
+}
+
+std::vector<cv::Mat> loadFeaturesFromVideo(std::vector<std::string> video_file_paths, const std::string& descriptor = "orb", int every_nth_frame=3) {
     cv::Ptr<cv::Feature2D> feat_detector;
     if (descriptor == "orb") feat_detector = cv::ORB::create(2000);
     else if (descriptor == "brisk") feat_detector = cv::BRISK::create();
@@ -87,6 +149,7 @@ std::vector<cv::Mat> loadFeaturesFromVideo(std::vector<std::string> video_file_p
     cv::VideoCapture cap;
     int i = 0;
     cv::Mat frame;
+    int frames_since_last_detected = 1;
     
     for (std::string video_file_path : video_file_paths) {
         cap.open(video_file_path);
@@ -94,47 +157,35 @@ std::vector<cv::Mat> loadFeaturesFromVideo(std::vector<std::string> video_file_p
             std::cout << "Error opening video stream or file" << std::endl;
             return features;
         }
+        int total_frames= cap.get(cv::CAP_PROP_FRAME_COUNT);
         i = 0;
         while(1){
             std::vector<cv::KeyPoint> keypoints;
             cv::Mat descriptors;
-            std::cout << "reading frame: #" << i << std::endl;
             cap >> frame;
             if (frame.empty()) {
                 std::cerr << "could not open frame: #" << i << ". Aborting." << std::endl;
                 break;
             }
-            feat_detector->detectAndCompute(frame, cv::Mat(), keypoints, descriptors);
-            std::cout << "extracted features: total = " << keypoints.size() << std::endl;
-            features.push_back(descriptors);
-            i++;
+            // if we pick every frame we create a lot of output features but many of them will contain the same information
+            // the clustering might group a lot of them together but they still will have a negative impact
+            // as this is rather bad for a robust and general vocabulary we should jump ahead a few frames every time
+            if(frames_since_last_detected==every_nth_frame){
+                std::cout << "reading frame: " << i <<  "|" << total_frames/every_nth_frame << "-> " << (float(i)/float(total_frames/every_nth_frame))*100 << "%" << std::endl;
+                frames_since_last_detected = 1;
+                feat_detector->detectAndCompute(frame, cv::Mat(), keypoints, descriptors);
+                std::cout << "extracted features: total = " << keypoints.size() << std::endl;
+                features.push_back(descriptors);
+                i++;
+            }else{
+                frames_since_last_detected++;
+            }
+            
         }
     }
     cap.release();
     std::cout << "done detecting features" << std::endl;
     return features;
-}
-
-std::vector<std::string> createVideoList(std::string name_file){
-    std::vector<std::string> video_paths;
-    try
-    {
-        std::ifstream file(name_file);
-        std::string video_path; 
-        while (std::getline(file, video_path))
-        {
-         video_paths.push_back(video_path);
-        }
-        return video_paths;
-    }
-    catch(const std::exception& e)
-    {
-        std::cerr << e.what() << '\n';
-        return video_paths;
-    }
-    
-    
-    
 }
 
 void saveToFile(const std::string& filename, const std::vector<cv::Mat>& features, std::string desc_name, bool rewrite = true) {

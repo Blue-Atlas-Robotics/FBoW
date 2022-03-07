@@ -336,16 +336,21 @@ BoWVector Vocabulary::transform(const cv::Mat &features)
     if (_params._desc_type==CV_8UC1){
         //orb
         if (cpu_info->HW_x64){
-            if (_params._desc_size==32)
+            if (_params._desc_size==32){
                 result=_transform<L1_32bytes>(features);
+            }
             //full akaze
-            else if( _params._desc_size==61 && _params._aligment%8==0)
+            else if( _params._desc_size==61 && _params._aligment%8==0){
                 result=_transform<L1_61bytes>(features);
+                }
             //generic
-            else
+            else {
                 result=_transform<L1_x64>(features );
+            }
         }
-        else  result=  _transform<L1_x32>(features );
+        else  {
+            result=  _transform<L1_x32>(features );
+        }
     }
     else if(features.type()==CV_32FC1){
         if( cpu_info->isSafeAVX() && _params._aligment%32==0){ //AVX version
@@ -361,16 +366,69 @@ BoWVector Vocabulary::transform(const cv::Mat &features)
     }
     else throw std::runtime_error("Vocabulary::transform invalid feature type. Should be CV_8UC1 or CV_32FC1");
 
+    std::ofstream BoW_file("BoW_values_before_norm.txt");
+    for (auto& t : result){
+        BoW_file << t.first << " " << t.second << "\n";
+    }
+    BoW_file.close();
+    
     ///now, normalize
     //L2
     double norm=0;
     for(auto  e:result) norm += e.second * e.second;
-
     if(norm > 0.0)
     {
         double inv_norm = 1./sqrt(norm);
         for(auto  &e:result) e.second*=inv_norm ;
     }
+    return result;
+}
+
+std::map<int,bool> Vocabulary::transformIDF(const cv::Mat &features)
+{
+    std::map<int,bool> result;
+    if (features.rows==0) return result;
+    if (features.type()!=_params._desc_type) throw std::runtime_error("Vocabulary::transform features are of different type than vocabulary");
+    if (features.cols *  features.elemSize() !=size_t(_params._desc_size)) throw std::runtime_error("Vocabulary::transform features are of different size than the vocabulary ones");
+
+    //get host info to decide the version to execute
+    if (!cpu_info){
+        cpu_info=std::make_shared<cpu>();
+        cpu_info->detect_host();
+    }
+    //decide the version to employ according to the type of features, aligment and cpu capabilities
+    if (_params._desc_type==CV_8UC1){
+        //orb
+        if (cpu_info->HW_x64){
+            if (_params._desc_size==32){
+                result=_transformIDF<L1_32bytes>(features);
+            }
+            //full akaze
+            else if( _params._desc_size==61 && _params._aligment%8==0){
+                result=_transformIDF<L1_61bytes>(features);
+                }
+            //generic
+            else {
+                result=_transformIDF<L1_x64>(features );
+            }
+        }
+        else  {
+            result=  _transformIDF<L1_x32>(features );
+        }
+    }
+    else if(features.type()==CV_32FC1){
+        if( cpu_info->isSafeAVX() && _params._aligment%32==0){ //AVX version
+            if ( _params._desc_size==256) result= _transformIDF<L2_avx_8w>(features);//specific for surf 256 bytes
+            else result= _transformIDF<L2_avx_generic>(features);//any other
+        }
+        if( cpu_info->isSafeSSE() && _params._aligment%16==0){//SSE version
+            if ( _params._desc_size==256) result= _transformIDF<L2_sse3_16w>(features);//specific for surf 256 bytes
+            else result=_transformIDF<L2_se3_generic>(features);//any other
+        }
+        //generic version
+        result=_transformIDF<L2_generic>(features);
+    }
+    else throw std::runtime_error("Vocabulary::transform invalid feature type. Should be CV_8UC1 or CV_32FC1");
     return result;
 }
 

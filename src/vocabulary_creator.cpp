@@ -32,8 +32,37 @@ inline int omp_get_max_threads(){return 1;}
 inline int omp_get_thread_num(){return 0;}
 #endif
 #include <iostream>
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/features2d/features2d.hpp>
 using namespace std;
 namespace fbow{
+
+std::vector<cv::Mat> readFeaturesFromFile(const std::string filename, std::string desc_name) {
+    std::vector<cv::Mat> features;
+    std::ifstream ifile(filename, std::ios::binary);
+    if (!ifile.is_open()) {
+        std::cerr << "could not open the input file: " << filename << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    char _desc_name[20];
+    ifile.read(_desc_name, 20);
+    desc_name = _desc_name;
+
+    uint32_t size;
+    ifile.read((char*) &size, sizeof(size));
+    features.resize(size);
+    for (size_t i = 0; i < size; i++) {
+        uint32_t cols, rows, type;
+        ifile.read((char*)&cols, sizeof(cols));
+        ifile.read((char*)&rows, sizeof(rows));
+        ifile.read((char*)&type, sizeof(type));
+        features[i].create(rows, cols, type);
+        ifile.read((char*)features[i].ptr<uchar>(0), features[i].total() * features[i].elemSize());
+    }
+    return features;
+}
 
 void VocabularyCreator::create(fbow::Vocabulary &Voc, const  cv::Mat  &features, const std::string &desc_name, Params params)
 {
@@ -115,6 +144,7 @@ void VocabularyCreator::thread_consumer(int idx){
 
 //ready to be threaded using producer consumer
 void  VocabularyCreator::createLevel(  int parent, int curL,bool recursive){
+    std::cout << "Creating Level " << curL+1 << std::endl;
     std::vector<cv::Mat> center_features;
     std::vector<vector_sptr > assigments_ref;
     assert(id_assigments.count(parent));
@@ -156,15 +186,25 @@ void  VocabularyCreator::createLevel(  int parent, int curL,bool recursive){
 
     //add to the tree the set of nodes
     std::vector<Node> new_nodes;
+    int fts_in_cluster;
     new_nodes.reserve(center_features.size());
     {
-        for(size_t c=0;c<center_features.size();c++)
-        new_nodes.push_back(Node(parent*_params.k+1+c,parent,center_features[c], findices.size()==center_features.size()?findices[c]:std::numeric_limits<uint32_t>::max()));
+        // assignments are stored in assignments_ref[center_nr] -> by using the size of the vector, we can get how many features have been assigned to each cluster
+        for(size_t c=0;c<center_features.size();c++){
+            //std::cout << "Assignment Ref L=" << curL << " K=" << c << ": " << assigments_ref[c].get()->size() << std::endl;
+            if(assigments_ref.size()!=0){
+                fts_in_cluster = assigments_ref[c].get()->size();
+            }else{
+                fts_in_cluster=1;
+            }
+            new_nodes.push_back(Node(parent*_params.k+1+c,parent, fts_in_cluster,center_features[c], findices.size()==center_features.size()?findices[c]:std::numeric_limits<uint32_t>::max()));
+            //std::cout << "Points in cluster: " << new_nodes[0].points_in_cluster << std::endl;
+        }
     }
     TheTree.add(new_nodes,parent);
     //we can now remove the assigments of the parent
     id_assigments.erase(parent);
-  //  std::cout<<"parent "<<parent<<" done"<<std::endl;
+    //std::cout<<"parent "<<parent<<" done"<<std::endl;
 
     //should we go deeper?
     if ( ( (_params.L!=-1 && curL<(_params.L-1)) || _params.L==-1)  && assigments_ref.size()>0){
@@ -360,7 +400,6 @@ void VocabularyCreator::convertIntoVoc(Vocabulary &Voc,  std::string  desc_name)
 
     //look for leafs and store
     //now, create the blocks
-
     uint32_t nLeafNodes=0;
     uint32_t nonLeafNodes=0;
     std::map<uint32_t,uint32_t> nodeid_blockid;
@@ -379,6 +418,13 @@ void VocabularyCreator::convertIntoVoc(Vocabulary &Voc,  std::string  desc_name)
     int aligment=8;
     if (_descType==CV_32F) aligment=32;
     Voc.setParams(aligment,_params.k,_descType,_descNBytes,nonLeafNodes,desc_name);
+    //get total features for IDF
+    int total_features=0;
+    for(int i=1; i<=_params.k;i++){
+        total_features+=TheTree.getNodes()[i].points_in_cluster;
+    }
+    std::cout << "Total features: " << total_features << std::endl;
+    std::map<int,float> cripness_map;
 
     //lets start
     for(auto &node:TheTree.getNodes()){
@@ -391,7 +437,15 @@ void VocabularyCreator::convertIntoVoc(Vocabulary &Voc,  std::string  desc_name)
                 Node &child=TheTree.getNodes()[node.second.children[c]];
                 binfo.setFeature(c,child.feature);
                 //go to the end and set info
-                if (child.isLeaf())   binfo.getBlockNodeInfo(c)->setLeaf(child.feat_idx,child.weight);
+                if (child.isLeaf()){
+                    if(child.points_in_cluster==0){
+                        child.points_in_cluster=1;
+                    }
+                    // this weight value only focuses on the crispness of a word -> many features in a leaf result in a unprecise, averaged word.
+                    float crispness = (float)1.0/(float)child.points_in_cluster;
+                    cripness_map[child.feat_idx]=crispness;
+                    binfo.getBlockNodeInfo(c)->setLeaf(child.feat_idx,crispness);
+                }
                 else {
                     binfo.getBlockNodeInfo(c)->setNonLeaf(nodeid_blockid[child.id]);
                     areAllChildrenLeaf=false;
@@ -400,6 +454,75 @@ void VocabularyCreator::convertIntoVoc(Vocabulary &Voc,  std::string  desc_name)
             binfo.setLeaf(areAllChildrenLeaf);
         }
     }
+    std::cout << "Finished creating Vocabulary. Starting IDF weigth calculation." << std::endl;
+    // Voc is created but weights are only based on crispness until here. 
+    // to get the needed IDF involved, we need to adjust the weights based on number of occurences of each word in an image test set
+
+    // which images/test set to use?
+
+    std::map<int, int> words_number_of_occurances;
+    std::vector<cv::Mat> features = readFeaturesFromFile("/home/decamargo/Documents/feature_output", "orb");
+    int number_of_images = features.size();
+    
+    // transform IDF transforms the image and stores the amount of features in the image and features per word
+    //  we perform this for a set of X images and use the stored values to determine the two following parameters:
+    //For any "visual word", the Document Frequency (DF) is the number of images containing this "visual word" divided by the total number of images. The IDF is the inverse of this value.
+    //The "Term Frequency" (TF) of a "visual word" in a particular image is how many times the "word" appears in the image divided by the total number of "words" in this image.
+    
+    for(auto f : features){
+        std::map<int, bool> feature_occured_map=Voc.transformIDF(f);
+        for (auto i : feature_occured_map){
+            if (!words_number_of_occurances.count(i.first)) {
+            // not found -> word has not occured yet and has to be added to the map
+            words_number_of_occurances.insert({i.first, 1});
+            } else {
+            // found -> word already in map: we increment the count
+            words_number_of_occurances[i.first]+=1;
+            }
+        } 
+    }
+    // using id in idf map to store the information attached to the actual word
+    //-> go into each leaf and change the weight to IDF
+
+    float idf;
+    for(auto &node:TheTree.getNodes()){
+        if (!node.second.isLeaf()){
+            auto binfo=Voc.getBlock(nodeid_blockid[node.first]);
+            binfo.setN(node.second.children.size());
+            binfo.setParentId(node.first);
+            bool areAllChildrenLeaf=true;
+            for(size_t c=0;c< node.second.children.size();c++){
+                Node &child=TheTree.getNodes()[node.second.children[c]];
+                binfo.setFeature(c,child.feature);
+                //go to the end and set info
+                if (child.isLeaf()){
+                    // calculating IDF of the word
+                    idf = log((float)number_of_images/(float)words_number_of_occurances[child.feat_idx]);
+                    // words with no occurances : are in map but value == 0 exist
+                    if(words_number_of_occurances[child.feat_idx]==0){
+                        std::cout << "Value in occurance map with value 0" << std::endl;
+                    }
+                    if(!cripness_map.count(child.feat_idx)){
+                        std::cout << "No crispness for this node" << std::endl;
+                    }
+                    if(!words_number_of_occurances.count(child.feat_idx)){
+                        std::cout << "Word not in map" << std::endl;
+                        idf = log((float)number_of_images);
+                    }else{
+                        std::cout << words_number_of_occurances[child.feat_idx] << std::endl;
+                    }
+                    // include crispness for tests
+                    binfo.getBlockNodeInfo(c)->setLeaf(child.feat_idx, idf * cripness_map[child.feat_idx]);
+                }
+                else {
+                    binfo.getBlockNodeInfo(c)->setNonLeaf(nodeid_blockid[child.id]);
+                    areAllChildrenLeaf=false;
+                }
+            }
+            binfo.setLeaf(areAllChildrenLeaf);
+        }
+    }
+    std::cout << "Images: " << number_of_images << std::endl;
 }
 float VocabularyCreator::distance_hamming_generic(const cv::Mat &a, const cv::Mat &b){
     uint64_t ret=0;

@@ -16,7 +16,6 @@ do
     #duration_in_sec=$(ffprobe -i some_video -show_entries format=duration -v quiet -of csv="p=0")
     echo "Video duration: "$duration_in_sec"" >> "$1".txt
     START_TIME=$SECONDS
-    #./generate_vocab.sh tmp_video_list.txt true outputvoc 10 6
     ../build/utils/fbow_dump_features orb feature_output tmp_video_list.txt TRUE
     ELAPSED_TIME=$(($SECONDS - $START_TIME))
     file_size="$(wc -c < feature_output)"

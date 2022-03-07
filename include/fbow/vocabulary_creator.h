@@ -40,6 +40,7 @@ THE SOFTWARE.
 #include <opencv2/core/core.hpp>
 #include "fbow_exports.h"
 #include "fbow.h"
+#include <fstream>
 namespace fbow{
 /**This class creates the vocabulary
  */
@@ -173,12 +174,13 @@ private:
     //
     struct Node{
         Node(){}
-        Node(uint32_t Id,uint32_t Parent,const cv::Mat &Feature, uint32_t Feat_idx=std::numeric_limits<uint32_t>::max() ):id(Id),parent(Parent),feature(Feature),feat_idx(Feat_idx){
+        Node(uint32_t Id,uint32_t Parent, int Points_in_cluster,const cv::Mat &Feature, uint32_t Feat_idx=std::numeric_limits<uint32_t>::max() ):id(Id),parent(Parent), points_in_cluster(Points_in_cluster),feature(Feature),feat_idx(Feat_idx){
 
         }
 
         uint32_t id=std::numeric_limits<uint32_t>::max();//id of this node in the tree
         uint32_t parent=std::numeric_limits<uint32_t>::max();//id of the parent node
+        int points_in_cluster; //how many points belong to the cluster. Relevant for calculating the IDF for the weight.
         cv::Mat feature;//feature of this node
         //index of the feature this node represent(only if leaf and it stop because not enough points to create a new leave.
         //In case the node is a terminal point, but has many points beloging to its cluster, then, this is not set.
